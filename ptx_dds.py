@@ -3,6 +3,8 @@
 #   python ptx_dds.py todds  FILE.PTX  FILE.DDS
 #   python ptx_dds.py toptx  FILE.DDS  ORIGINAL.PTX  NEW.PTX
 #   python ptx_dds.py verify FILE.PTX [MORE.PTX ...]     (PTX -> DDS -> PTX must be byte-identical)
+#   python ptx_dds.py split   FILE.PTX  COLOUR.DDS  MASK.DDS              (DXT5 only, e.g. BODY_DIFF)
+#   python ptx_dds.py combine COLOUR.DDS  MASK.DDS|-  ORIGINAL.PTX  NEW.PTX   ("-" = original mask)
 #
 # PTX layout (RIFF, little-endian):
 #   RIFF "PA__"
@@ -23,6 +25,8 @@ FORMATS = {b"DXT1": (8, None), b"DXT5": (16, None), b"BC4 ": (8, 80), b"BC5S": (
 BLOCK_BYTES = {k: v[0] for k, v in FORMATS.items()}
 # DXGI formats accepted from DDS files (BC1/BC3/BC7 also in their sRGB variants)
 DXGI = {71: b"DXT1", 72: b"DXT1", 77: b"DXT5", 78: b"DXT5", 80: b"BC4 ", 84: b"BC5S", 98: b"BC7 ", 99: b"BC7 "}
+# Legacy DDS fourccs for BC4, as saved by GIMP and Paint.NET
+FOURCC_ALIASES = {b"ATI1": b"BC4 ", b"BC4U": b"BC4 "}
 
 
 def level_size(fourcc, w, h):
@@ -79,10 +83,11 @@ def write_ptx(head, fourcc, w, h, levels):
     return chunk(b"RIFF", b"PA__" + body)
 
 
-def write_dds(fourcc, w, h, levels):
+def write_dds(fourcc, w, h, levels, legacy_tag=None):
+    # legacy_tag: write this fourcc (e.g. b"ATI1" for BC4) instead of a DX10 header, for older editors
     flags = 0x1 | 0x2 | 0x4 | 0x1000 | 0x20000 | 0x80000  # CAPS|HEIGHT|WIDTH|PIXELFORMAT|MIPMAPCOUNT|LINEARSIZE
-    dxgi = FORMATS[fourcc][1]
-    pf = struct.pack("<II4s5I", 32, 0x4, b"DX10" if dxgi else fourcc, 0, 0, 0, 0, 0)  # DDPF_FOURCC
+    dxgi = None if legacy_tag else FORMATS[fourcc][1]
+    pf = struct.pack("<II4s5I", 32, 0x4, b"DX10" if dxgi else legacy_tag or fourcc, 0, 0, 0, 0, 0)  # DDPF_FOURCC
     caps = 0x8 | 0x1000 | 0x400000  # COMPLEX|TEXTURE|MIPMAP
     header = struct.pack("<7I", 124, flags, h, w, len(levels[0]), 0, len(levels)) + b"\0" * 44 + pf
     header += struct.pack("<5I", caps, 0, 0, 0, 0)
@@ -102,6 +107,7 @@ def read_dds(data):
         dxgi = struct.unpack_from("<I", data, 128)[0]
         assert dxgi in DXGI, f"DXGI format {dxgi} not supported: save as BC3/DXT5 (or BC1/DXT1)"
         fourcc, pos = DXGI[dxgi], 148
+    fourcc = FOURCC_ALIASES.get(fourcc, fourcc)
     assert pf_flags & 0x4 and fourcc in BLOCK_BYTES, f"format {fourcc!r} not supported: save as BC3/DXT5 (or BC1/DXT1)"
     levels = []
     for i in range(mips):
@@ -141,6 +147,111 @@ def to_ptx(dds_path, template_path, out_path):
     print(f"{dds_path} -> {out_path}  ({info})")
 
 
+# --- Colour + mask: DXT5 textures whose alpha is a mask, not transparency (BODY_DIFF) ---
+# Image editors show that alpha as transparency, so the painted bodywork looks empty. "split" saves
+# the colour as an opaque DXT1 DDS and the alpha as a separate BC4 DDS; "combine" puts them back
+# into a DXT5 PTX. A DXT5 block is a BC4 alpha block followed by a colour block, so both steps
+# copy the compressed blocks: nothing is re-compressed (except the rare DXT1 blocks that use the
+# 3-colour mode, which DXT5 does not have).
+
+def _rgb565(c):
+    return ((c >> 11) & 31) * 255 // 31, ((c >> 5) & 63) * 255 // 63, (c & 31) * 255 // 31
+
+
+def _to565(r, g, b):
+    return ((r * 31 + 127) // 255) << 11 | ((g * 63 + 127) // 255) << 5 | ((b * 31 + 127) // 255)
+
+
+def _dxt1_safe(c0, c1, idx):
+    # DXT5 colour blocks always use 4 colours, while in DXT1 c0 <= c1 selects the 3-colour +
+    # transparent mode: swap the endpoints (index 0<->1, 2<->3) so the block decodes the same
+    if c0 > c1:
+        return c0, c1, idx
+    if c0 == c1:
+        return c0, c1, 0  # a single colour
+    return c1, c0, idx ^ 0x55555555
+
+
+def _dxt5_colour(c0, c1, idx):
+    # DXT1 colour block -> DXT5 colour block
+    if c0 > c1 or not idx & 0xAAAAAAAA:
+        return c0, c1, idx  # 4-colour block, or only the endpoints used: decodes the same
+    # 3-colour mode (half-way colour or transparent black): fit a 4-colour block to its pixels
+    a, b = _rgb565(c0), _rgb565(c1)
+    palette = [a, b, tuple((x + y) // 2 for x, y in zip(a, b)), (0, 0, 0)]
+    px = [palette[(idx >> 2 * i) & 3] for i in range(16)]
+    e0 = _to565(*(max(p[k] for p in px) for k in range(3)))
+    e1 = _to565(*(min(p[k] for p in px) for k in range(3)))
+    if e0 == e1:
+        return e0, e1, 0
+    a, b = _rgb565(e0), _rgb565(e1)
+    palette = [a, b, tuple((2 * x + y) // 3 for x, y in zip(a, b)), tuple((x + 2 * y) // 3 for x, y in zip(a, b))]
+    new = 0
+    for i, p in enumerate(px):
+        best = min(range(4), key=lambda j: sum((p[k] - palette[j][k]) ** 2 for k in range(3)))
+        new |= best << 2 * i
+    return e0, e1, new
+
+
+def _alpha_levels(levels):
+    return [b"".join(lv[i:i + 8] for i in range(0, len(lv), 16)) for lv in levels]
+
+
+def split_ptx(ptx_data):
+    # DXT5 PTX -> (colour DDS in DXT1, mask DDS in BC4, description)
+    _, fourcc, w, h, levels = read_ptx(ptx_data)
+    if fourcc != b"DXT5":
+        raise ValueError(f"the texture is {describe(fourcc, w, h, levels)}: only DXT5 textures "
+                         "(e.g. BODY_DIFF) have a mask in their alpha channel")
+    colour = [b"".join(struct.pack("<HHI", *_dxt1_safe(c0, c1, idx))
+                       for _, c0, c1, idx in struct.iter_unpack("<8sHHI", lv)) for lv in levels]
+    return (write_dds(b"DXT1", w, h, colour), write_dds(b"BC4 ", w, h, _alpha_levels(levels), b"ATI1"),
+            describe(fourcc, w, h, levels))
+
+
+def combine_to_ptx(colour_data, mask_data, template_data):
+    # Colour DDS (DXT1 or DXT5) + mask DDS (BC4, or None = the original's) -> DXT5 PTX
+    head, t_fourcc, t_w, t_h, t_levels = read_ptx(template_data)
+    if t_fourcc != b"DXT5":
+        raise ValueError(f"the original is {describe(t_fourcc, t_w, t_h, t_levels)}: combine needs a DXT5 texture")
+    n = len(t_levels)
+
+    def load(data, what, formats, hint):
+        fourcc, w, h, levels = read_dds(data)
+        if fourcc not in formats or (w, h) != (t_w, t_h):
+            raise ValueError(f"the {what} DDS is {describe(fourcc, w, h, levels)}: save it as {hint}, {t_w}x{t_h}")
+        if len(levels) < n:
+            raise ValueError(f"the {what} DDS has {len(levels)} mipmaps, {n} are needed: save it with mipmaps")
+        return fourcc, levels[:n]
+
+    c_fourcc, colour = load(colour_data, "colour", (b"DXT1", b"DXT5"), "BC1/DXT1 (or BC3/DXT5)")
+    mask = _alpha_levels(t_levels) if mask_data is None else load(mask_data, "mask", (b"BC4 ",), "BC4/ATI1")[1]
+    levels = []
+    for c, m in zip(colour, mask):
+        if c_fourcc == b"DXT5":
+            blocks = (c[i + 8:i + 16] for i in range(0, len(c), 16))
+        else:
+            blocks = (struct.pack("<HHI", *_dxt5_colour(*b)) for b in struct.iter_unpack("<HHI", c))
+        levels.append(b"".join(m[i * 8:i * 8 + 8] + blk for i, blk in enumerate(blocks)))
+    return write_ptx(head, b"DXT5", t_w, t_h, levels), describe(b"DXT5", t_w, t_h, levels)
+
+
+def split(ptx_path, colour_path, mask_path):
+    colour, mask, info = split_ptx(Path(ptx_path).read_bytes())
+    Path(colour_path).write_bytes(colour)
+    Path(mask_path).write_bytes(mask)
+    print(f"{ptx_path} -> {colour_path} + {mask_path}  ({info})")
+
+
+def combine(colour_path, mask_path, template_path, out_path):
+    if Path(out_path).resolve() == Path(template_path).resolve():
+        raise SystemExit("refusing to overwrite the original PTX: choose another output file")
+    mask = None if mask_path == "-" else Path(mask_path).read_bytes()
+    data, info = combine_to_ptx(Path(colour_path).read_bytes(), mask, Path(template_path).read_bytes())
+    Path(out_path).write_bytes(data)
+    print(f"{colour_path} + {'original mask' if mask is None else mask_path} -> {out_path}  ({info})")
+
+
 def verify(paths):
     ok = 0
     for p in paths:
@@ -158,7 +269,8 @@ def verify(paths):
     return ok == len(paths)
 
 
-USAGE = "usage: ptx_dds.py todds FILE.PTX FILE.DDS | toptx FILE.DDS ORIGINAL.PTX NEW.PTX | verify FILE.PTX ..."
+USAGE = ("usage: ptx_dds.py todds FILE.PTX FILE.DDS | toptx FILE.DDS ORIGINAL.PTX NEW.PTX | verify FILE.PTX ...\n"
+         "       ptx_dds.py split FILE.PTX COLOUR.DDS MASK.DDS | combine COLOUR.DDS MASK.DDS|- ORIGINAL.PTX NEW.PTX")
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
@@ -169,6 +281,10 @@ if __name__ == "__main__":
             to_dds(*args)
         elif cmd == "toptx" and len(args) == 3:
             to_ptx(*args)
+        elif cmd == "split" and len(args) == 3:
+            split(*args)
+        elif cmd == "combine" and len(args) == 4:
+            combine(*args)
         elif cmd == "verify":
             sys.exit(0 if verify(args) else 1)
         else:

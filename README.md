@@ -19,6 +19,7 @@ Convert **WRC Generations** textures (`.PTX`) to `.DDS` and back, and use them t
 
 - *PTX → DDS (export):* pick a game texture and where to save the DDS.
 - *DDS → PTX (import):* pick your edited DDS, the **original PTX** (used as template) and where to save the new PTX.
+- *Colour + mask (liveries):* split a `BODY_DIFF` into colour and mask, and combine them back into a PTX (see below).
 
 **Command line:**
 
@@ -26,11 +27,23 @@ Convert **WRC Generations** textures (`.PTX`) to `.DDS` and back, and use them t
 python ptx_dds.py todds  BODY_DIFF.PTX  my_livery.dds
 python ptx_dds.py toptx  my_livery.dds  BODY_DIFF.PTX  NEW_BODY_DIFF.PTX
 python ptx_dds.py verify FILE.PTX [...]     # PTX -> DDS -> PTX round-trip check
+python ptx_dds.py split   BODY_DIFF.PTX  colour.dds  mask.dds
+python ptx_dds.py combine colour.dds  mask.dds  BODY_DIFF.PTX  NEW_BODY_DIFF.PTX   # "-" instead of mask.dds keeps the original mask
 ```
 
 When importing, the DDS must have the **same format and size** as the original and include mipmaps. Extra small mipmaps are dropped automatically (the game stops at 4×4).
 
 **Editing:** Paint.NET and GIMP open and save DDS natively; Photoshop needs the NVIDIA Texture Tools or Intel Texture Works plugin. Save liveries as **BC3/DXT5, 4096×4096, with mipmaps**.
+
+### Colour and mask
+
+The alpha channel of `BODY_DIFF` is not transparency: it is a mask (alpha 0 on the painted bodywork, 255 on the other parts). Image editors show it as transparency, so the livery looks empty. To paint without it:
+
+1. **Split** the PTX: you get an opaque **colour** DDS (BC1/DXT1) and a **mask** DDS (BC4/ATI1, greyscale).
+2. Paint the colour file and save it as **BC3/DXT5** (exact: its alpha is ignored) or BC1/DXT1, 4096×4096, **with mipmaps**. Leave the mask alone unless you need to change it (save it as BC4/ATI1 with mipmaps).
+3. **Combine** colour + mask with the original `BODY_DIFF.PTX` as template. Without a mask the original one is kept.
+
+Split and combine copy the compressed blocks, so an unedited colour + mask gives back the original PTX byte for byte. The only exception is a BC1 block saved in its 3-colour mode, which BC3 does not have: it is re-fitted to 4 colours and may change slightly, which is why BC3 is the safer choice for the colour.
 
 ## How liveries are stored
 
@@ -38,7 +51,7 @@ Each livery is a folder, e.g. `WIN32\GRAPH\CARS\LEGENDS\SUBARU_IMPREZA_S5\MCRAE\
 
 | File | Content |
 |---|---|
-| `BODY_DIFF.PTX` | the livery artwork (DXT5 4096×4096) – **this is what you paint** |
+| `BODY_DIFF.PTX` | the livery artwork (DXT5 4096×4096, mask in the alpha channel) – **this is what you paint** |
 | `BODY_IOR.PTX` | reflections / roughness (DXT1) |
 | `*.PMA` | materials; they contain the absolute paths of the textures above |
 
