@@ -17,6 +17,7 @@ Convert **WRC Generations** textures (`.PTX`) to `.DDS` and back, and use them t
 
 **GUI:** double-click `ptx_converter.bat`.
 
+- *Livery workspace* (first tab): open a livery folder, or any PTX in it, and you get all its textures in one list, with format, size, a small preview and a status. `BODY_DIFF` appears twice, as *colour* and *mask* (see below). Select the textures you want (Ctrl/Shift for several) and **Export selected to DDS**: they go into a work folder, by default `Desktop\WRCG_TEXTURES\<car>\<livery>` (change it with *Change...*, open it with *Show in Explorer*). Paint the DDS files there, then **Save modified to PTX**: only the DDS files changed since they were exported are converted, and written back as the PTX files of the livery folder. Status: *not exported*, *exported* (unchanged), *modified*, *saved*. The first save of each texture keeps the original PTX in `<work folder>\ORIGINALI`, which is the template of later saves; **Restore originals** puts those back. A DDS with the wrong format or size (e.g. only a layer exported by the editor) is reported and its PTX is not written. The work folder remembers what was exported in `workspace.json`.
 - *PTX → DDS (export):* pick a game texture and where to save the DDS.
 - *DDS → PTX (import):* pick your edited DDS, the **original PTX** (used as template) and where to save the new PTX.
 - *Colour + mask (liveries):* split a `BODY_DIFF` into colour and mask, and combine them back into a PTX (see below).
@@ -88,6 +89,8 @@ Two more pieces link a livery to the game:
 7. **Use it.** Set it as the `Car` of a team in `TEAMS.CFG`, or select it in game.
 
 ## Known limitations
+
+- Normal maps (`*_NRM`, BC5 signed): most editors save BC5 as unsigned, which the import refuses (the format must match the original). They can be exported to look at them.
 
 - The livery thumbnail in menus is taken from the `Skin` image of the livery you copied.
 - Uncompressed RGBA textures (a few dirt masks) are not supported; livery textures are not affected.

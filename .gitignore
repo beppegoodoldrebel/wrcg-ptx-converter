@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+# game textures and edited liveries: keep them out of the repository
+*.PTX
+*.ptx
+*.DDS
+*.dds
+.gitattributes
