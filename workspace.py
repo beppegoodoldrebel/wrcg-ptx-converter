@@ -8,6 +8,9 @@
 # - The first save of a texture copies the original PTX into <work folder>\ORIGINALI; that copy is the
 #   template of every later save and is what "restore" puts back.
 # - A DDS with the wrong format or size is reported and its PTX is not written.
+# - A DDS made elsewhere (e.g. another livery's MUNARI_BODY_DIFF_COLOUR.DDS) can be loaded into the work
+#   folder as the DDS of a texture (load(), matched by name with match()): it is checked and then shows
+#   as "modified", ready to be saved.
 
 import hashlib
 import json
@@ -120,7 +123,7 @@ class Workspace:
             data = self.template(item.ptx).read_bytes()
             if item.part == "full":
                 _, fourcc, w, h, levels = ptx_dds.read_ptx(data)
-                out = ptx_dds.write_dds(fourcc, w, h, levels)
+                out = ptx_dds.editable_dds(fourcc, w, h, levels)     # normal maps as BC5 unsigned
             else:
                 colour, mask, _ = ptx_dds.split_ptx(data)
                 out = colour if item.part == "colour" else mask
@@ -130,6 +133,31 @@ class Workspace:
             done.append(item.dds_name)
         self._save_manifest()
         return done
+
+    def match(self, path):
+        """Item a DDS from elsewhere belongs to, by name: the file name must end with the item's DDS name
+        (e.g. MUNARI_BODY_DIFF_COLOUR.DDS -> BODY_DIFF colour); the longest match wins. None if none."""
+        stem = Path(path).stem.upper()
+        found = [i for i in self.items if i.editable and stem.endswith(Path(i.dds_name).stem.upper())]
+        return max(found, key=lambda i: len(i.dds_name), default=None)
+
+    def load(self, item, src):
+        """Copies a DDS made elsewhere into the work folder as the DDS of item, after checking its format,
+        size and mipmaps; it then shows as "modified" and the next save writes it to the PTX."""
+        data = Path(src).read_bytes()
+        fourcc, w, h, levels = ptx_dds.read_dds(data)
+        formats = {"colour": (b"DXT1", b"DXT5"), "mask": (b"BC4 ",)}.get(item.part, (item.fourcc,))
+        hint = {"colour": "BC1/DXT1 or BC3/DXT5", "mask": "BC4/ATI1"}.get(item.part, item.fourcc.decode().strip())
+        if item.part == "full" and item.fourcc == b"BC5S":       # normal maps: converted on save
+            formats, hint = ptx_dds.NORMAL_INPUTS, "BC5 (ATI2), BC3/DXT5 or BC1/DXT1"
+        if fourcc not in formats or (w, h) != (item.w, item.h):
+            raise ValueError(f"{Path(src).name} is {ptx_dds.describe(fourcc, w, h, levels)}: "
+                             f"{item.dds_name} needs {hint}, {item.w}x{item.h}")
+        if len(levels) < item.mips:
+            raise ValueError(f"{Path(src).name} has {len(levels)} mipmaps, {item.mips} are needed: save it with mipmaps")
+        self.work.mkdir(parents=True, exist_ok=True)
+        self.dds(item).write_bytes(data)
+        return item.dds_name
 
     def save(self, items=None):
         """Converts every modified DDS (of items, default all) back to PTX in the livery folder.

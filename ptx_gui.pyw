@@ -15,6 +15,8 @@ from tkinter import filedialog, messagebox, ttk
 sys.path.insert(0, str(Path(__file__).parent))
 import ptx_dds  # noqa: E402
 import workspace  # noqa: E402
+import sticker_editor  # noqa: E402
+import team_editor  # noqa: E402
 
 GAME_DIR = "WRC Generations - The FIA WRC Official Game"
 PTX_TYPES = [("Game textures", "*.PTX"), ("All files", "*.*")]
@@ -140,7 +142,8 @@ class App(tk.Tk):
         ttk.Button(bar, text="Change...", command=self.ws_change_work).pack(side="left", padx=2)
         ttk.Button(bar, text="Show in Explorer", command=self.ws_explore).pack(side="left", padx=2)
         ttk.Label(t4, foreground="#555", text="Select the textures (Ctrl/Shift for several), export them, edit the DDS "
-                  "in the work folder, then save: only the modified ones are converted back to PTX. "
+                  "in the work folder (or load a ready DDS with \"Load DDS...\"), then save: only the modified ones "
+                  "are converted back to PTX. "
                   "The first save keeps the original PTX in the work folder (ORIGINALI).", wraplength=1000).grid(
             row=2, column=0, columnspan=3, sticky="w", padx=6, pady=(4, 6))
         body = ttk.Frame(t4)
@@ -167,12 +170,31 @@ class App(tk.Tk):
         bar = ttk.Frame(t4)
         bar.grid(row=4, column=0, columnspan=3, pady=8)
         self.b5 = ttk.Button(bar, text="Export selected to DDS", command=self.ws_export)
+        self.b9 = ttk.Button(bar, text="Load DDS...", command=self.ws_load_dds)
         self.b6 = ttk.Button(bar, text="Save modified to PTX", command=self.ws_save)
         self.b7 = ttk.Button(bar, text="Refresh", command=self.ws_refresh)
         self.b8 = ttk.Button(bar, text="Restore originals", command=self.ws_restore)
-        for b in (self.b5, self.b6, self.b7, self.b8):
+        self.b10 = ttk.Button(bar, text="Stickers (numbers, names)...", command=self.ws_stickers)
+        for b in (self.b5, self.b9, self.b6, self.b7, self.b8, self.b10):
             b.pack(side="left", padx=4)
-        self.buttons = (self.b1, self.b2, self.b3, self.b4, self.b5, self.b6, self.b7, self.b8)
+        self.buttons = (self.b1, self.b2, self.b3, self.b4, self.b5, self.b6, self.b7, self.b8, self.b9)
+
+        # --- tab 5: teams and drivers (TEAMS.CFG and the liveries they drive)
+        t5 = ttk.Frame(nb, padding=8)
+        nb.insert(1, t5, text="  Teams & drivers  ")
+        t5.columnconfigure(1, weight=1)
+        self.game_root = tk.StringVar(value=str(textures.parents[2]) if textures else "")
+        ttk.Label(t5, text="Game folder:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(t5, textvariable=self.game_root, width=70).grid(row=0, column=1, sticky="we", padx=6)
+        ttk.Button(t5, text="Browse...", command=self.pick_game).grid(row=0, column=2, padx=6)
+        ttk.Label(t5, foreground="#555", wraplength=1000, justify="left", text=(
+            "Edit the teams of the game (TEAMS.CFG): team name, make, number, colour, driver and co-driver, AI level, "
+            "rallies and the car (livery) they drive. Disabled teams are free places for new crews (the game has a "
+            "fixed list of team IDs). A team can share a livery with others or get its own copy (Dedicated livery). "
+            "Everything is checked before saving; the first save of each file keeps the original in ORIGINALI.")).grid(
+            row=1, column=0, columnspan=3, sticky="w", padx=6, pady=(4, 8))
+        ttk.Button(t5, text="Open teams editor", command=self.open_teams).grid(row=2, column=1, pady=8)
+        self.load_dir = None  # folder of the last DDS loaded with "Load DDS..."
 
         self.status = tk.StringVar(value="Ready." if textures else "Ready (game folder not found: browse to it manually).")
         ttk.Label(self, textvariable=self.status, relief="sunken", anchor="w", padding=4).pack(fill="x", padx=8, pady=(0, 8))
@@ -264,6 +286,80 @@ class App(tk.Tk):
 
         self.run(job, "exported", after=self.ws_refresh)
 
+    def ws_load_dds(self):
+        # DDS made elsewhere -> the work folder, as the DDS of a texture (then "Save modified to PTX").
+        # One file with one selected row goes to that row; otherwise each file goes to the texture its
+        # name ends with (e.g. MUNARI_BODY_DIFF_COLOUR.DDS -> BODY_DIFF colour).
+        if not self.ws:
+            return messagebox.showwarning("PTX converter", "Open a livery first.")
+        start = self.load_dir or self.ws.work
+        files = filedialog.askopenfilenames(filetypes=DDS_TYPES, initialdir=str(start) if Path(start).exists() else None)
+        if not files:
+            return
+        files = [Path(f) for f in files]
+        self.load_dir = files[0].parent
+        sel = [i for i in (self.ws_item(s) for s in self.tree.selection()) if i.editable]
+        if len(files) == 1 and len(sel) == 1:
+            pairs = [(sel[0], files[0])]
+        else:
+            pairs = [(self.ws.match(f), f) for f in files]
+            unmatched = [f.name for item, f in pairs if item is None]
+            if unmatched:
+                return messagebox.showwarning("PTX converter", "No texture of this livery matches these names "
+                                              "(select one row and load one file to choose it yourself):\n\n" + "\n".join(unmatched))
+        # colour of a BODY_DIFF: offer its mask too, if it is next to it with the same name
+        if len(pairs) == 1 and pairs[0][0].part == "colour":
+            item, f = pairs[0]
+            mask_file = next((m for m in f.parent.glob("*.dds") if m.stem.upper() == f.stem.upper().replace("_COLOUR", "_MASK")
+                              and m != f), None)
+            mask_item = next((i for i in self.ws.items if i.ptx == item.ptx and i.part == "mask"), None)
+            if mask_file and mask_item and messagebox.askyesno("PTX converter", f"Load its mask too?\n\n{mask_file.name}"):
+                pairs.append((mask_item, mask_file))
+        targets = [item for item, _ in pairs]
+        if len(set(t.dds_name for t in targets)) < len(targets):
+            return messagebox.showwarning("PTX converter", "Two files go to the same texture: load them one at a time.")
+        pending = [t.dds_name for t in targets if self.ws.status(t) == "modified"]
+        if pending and not messagebox.askyesno("PTX converter", "These DDS files have changes not saved to PTX yet and "
+                                               "will be replaced:\n\n" + "\n".join(pending) + "\n\nContinue?"):
+            return
+
+        def job():
+            done, errors = [], []
+            for item, f in pairs:
+                try:
+                    done.append(f"{f.name} -> {self.ws.load(item, f)}")
+                except (AssertionError, ValueError) as e:
+                    errors.append(f"{f.name}: {e}")
+            msg = f"{len(done)} loaded" + (":\n" + "\n".join(done) if done else "")
+            if errors:
+                raise ValueError(msg + "\n\nNot loaded:\n" + "\n".join(errors))
+            return msg + "\n\nNow use \"Save modified to PTX\"."
+
+        self.run(job, "loaded", after=self.ws_refresh)
+
+    def pick_game(self):
+        path = filedialog.askdirectory(initialdir=self.game_root.get() or None)
+        if path:
+            self.game_root.set(str(Path(path)))
+
+    def open_teams(self):
+        root = Path(self.game_root.get().strip().strip('"'))
+        if not (root / "Common" / "Tuning" / "FACTORIES" / "TEAMS.CFG").exists():
+            return messagebox.showwarning("PTX converter", "Choose the game folder (the one with Common and WIN32).")
+        try:
+            team_editor.TeamEditor(self, root)
+        except (ValueError, OSError) as e:
+            messagebox.showerror("PTX converter", str(e))
+
+    def ws_stickers(self):
+        # positions of the race numbers, names, flags... drawn by the game (LIVERIES.LUA)
+        if not self.ws:
+            return messagebox.showwarning("PTX converter", "Open a livery first.")
+        try:
+            sticker_editor.StickerEditor(self, self.ws.livery)
+        except (ValueError, OSError) as e:
+            messagebox.showerror("PTX converter", str(e))
+
     def ws_save(self):
         if not self.ws:
             return messagebox.showwarning("PTX converter", "Open a livery first.")
@@ -288,6 +384,20 @@ class App(tk.Tk):
             return messagebox.showinfo("PTX converter", "Nothing to restore: no PTX has been saved from this work folder.")
         if messagebox.askyesno("PTX converter", "Put the original PTX back into the livery folder?\n\n" + "\n".join(backups)):
             self.run(lambda: f"{len(self.ws.restore())} PTX restored", "restored", after=self.ws_refresh)
+
+    # overwriting a PTX (also the original used as template): the first time, the old file is kept
+    # in <its folder>\ORIGINALI by ptx_dds.write_ptx_file
+    def confirm_overwrite(self, out):
+        if not out.exists():
+            return True
+        kept = out.parent / ptx_dds.BACKUP / out.name
+        note = (f"The original is already kept in {kept}." if kept.exists()
+                else f"The current file will be kept in {kept}.")
+        return messagebox.askyesno("PTX converter", f"{out.name} already exists: overwrite it?\n\n{note}")
+
+    @staticmethod
+    def backup_note(backup):
+        return f"; original kept in {backup.parent}" if backup else ""
 
     # default output names
     def suggest_dds(self, ptx):
@@ -343,7 +453,7 @@ class App(tk.Tk):
 
         def job():
             _, fourcc, w, h, levels = ptx_dds.read_ptx(src.read_bytes())
-            dst.write_bytes(ptx_dds.write_dds(fourcc, w, h, levels))
+            dst.write_bytes(ptx_dds.editable_dds(fourcc, w, h, levels))
             return ptx_dds.describe(fourcc, w, h, levels)
 
         self.run(job, f"saved {dst.name}")
@@ -352,13 +462,12 @@ class App(tk.Tk):
         dds, tpl, out = self.i_dds.get(), self.i_tpl.get(), self.i_out.get()
         if not dds or not tpl or not out:
             return messagebox.showwarning("PTX converter", "Choose the DDS, the original PTX and where to save.")
-        if out.resolve() == tpl.resolve():
-            return messagebox.showwarning("PTX converter", "Don't overwrite the original PTX: save with another name or folder.")
+        if not self.confirm_overwrite(out):
+            return
 
         def job():
             data, info = ptx_dds.dds_to_ptx(dds.read_bytes(), tpl.read_bytes())
-            out.write_bytes(data)
-            return info
+            return info + self.backup_note(ptx_dds.write_ptx_file(out, data))
 
         self.run(job, f"saved {out.name}")
 
@@ -379,13 +488,12 @@ class App(tk.Tk):
         col, msk, tpl, out = self.c_col.get(), self.c_msk.get(), self.c_tpl.get(), self.c_out.get()
         if not col or not tpl or not out:
             return messagebox.showwarning("PTX converter", "Choose the colour DDS, the original PTX and where to save.")
-        if out.resolve() == tpl.resolve():
-            return messagebox.showwarning("PTX converter", "Don't overwrite the original PTX: save with another name or folder.")
+        if not self.confirm_overwrite(out):
+            return
 
         def job():
             data, info = ptx_dds.combine_to_ptx(col.read_bytes(), msk.read_bytes() if msk else None, tpl.read_bytes())
-            out.write_bytes(data)
-            return info
+            return info + self.backup_note(ptx_dds.write_ptx_file(out, data))
 
         self.run(job, f"saved {out.name}")
 
